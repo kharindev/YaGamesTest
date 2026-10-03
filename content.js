@@ -73,6 +73,19 @@
     const box = root.querySelector(".box");
     const head = root.querySelector(".head");
     const body = root.querySelector(".body");
+    const fitButton = document.createElement("button");
+    fitButton.type = "button";
+    fitButton.title = "Размер по содержимому";
+    fitButton.setAttribute("aria-label", "Размер по содержимому");
+    fitButton.style.cssText = "display:grid;place-items:center;flex:0 0 28px;width:28px;height:28px;padding:5px;background:#292e39";
+    fitButton.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3v5H3m13-5v5h5M3 16h5v5m13-5h-5v5"/><path d="m3 3 5 5m13-5-5 5M3 21l5-5m13 5-5-5"/></svg>';
+    fitButton.addEventListener("mousedown", (event) => event.preventDefault());
+    fitButton.addEventListener("click", () => {
+      for (const property of ["width", "height", "min-width", "min-height", "overflow"]) box.style.removeProperty(property);
+      box.scrollTop = 0;
+      keepOverlayVisible();
+    }, { signal: listeners.signal });
+    head.append(fitButton);
     box.style.resize = "none";
     const grip = document.createElement("div");
     grip.title = "Изменить размер окна";
