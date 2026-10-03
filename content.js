@@ -41,10 +41,32 @@
     } catch (_) { stop(); }
   };
 
+  const minimumWindowSize = (root) => {
+    const head = root.querySelector(".head");
+    const body = root.querySelector(".body");
+    let width = 340;
+    const context = document.createElement("canvas").getContext("2d");
+    if (context) {
+      context.font = "600 12px system-ui";
+      for (const group of root.querySelectorAll(".actions, .toolbar, .dash-tabs")) {
+        const buttons = [...group.children].filter((element) => element.tagName === "BUTTON");
+        const columns = group.classList.contains("dash-tabs") ? 3 : group.classList.contains("single-action") || group.classList.contains("finished-actions") ? 1 : 2;
+        const buttonWidth = Math.max(0, ...buttons.map((button) => context.measureText(button.textContent).width + 24));
+        width = Math.max(width, buttonWidth * columns + (columns - 1) * 7 + 24);
+      }
+    }
+    return { width: Math.ceil(width), height: Math.ceil(head.getBoundingClientRect().height + body.getBoundingClientRect().height + 14) };
+  };
+
   const keepOverlayVisible = () => {
     if (!overlayHost?.isConnected || windowGesture) return;
     requestAnimationFrame(() => {
       if (!overlayHost?.isConnected || windowGesture) return;
+      const root = overlayHost.shadowRoot;
+      const box = root.querySelector(".box");
+      const minimum = minimumWindowSize(root);
+      box.style.minWidth = `${Math.min(minimum.width, Math.max(1, innerWidth - 20))}px`;
+      box.style.minHeight = `${Math.min(minimum.height, Math.max(1, innerHeight - 20))}px`;
       const rect = overlayHost.getBoundingClientRect();
       const left = Math.max(4, Math.min(Math.max(4, innerWidth - Math.min(rect.width, innerWidth - 8) - 4), rect.left));
       const top = Math.max(4, Math.min(Math.max(4, innerHeight - Math.min(rect.height, innerHeight - 8) - 4), rect.top));
@@ -116,12 +138,18 @@
         overlayHost.style.left = `${Math.max(4, Math.min(Math.max(4, innerWidth - gesture.width - 4), gesture.left + dx))}px`;
         overlayHost.style.top = `${Math.max(4, Math.min(Math.max(4, innerHeight - gesture.height - 4), gesture.top + dy))}px`;
       } else {
-        const maxWidth = Math.max(1, innerWidth - gesture.left - 4);
-        const maxHeight = Math.max(1, innerHeight - gesture.top - 4);
-        box.style.setProperty("width", `${Math.min(maxWidth, Math.max(Math.min(300, maxWidth), gesture.width + dx))}px`);
-        box.style.setProperty("height", `${Math.min(maxHeight, Math.max(Math.min(110, maxHeight), gesture.height + dy))}px`, "important");
-        box.style.minWidth = `${Math.min(300, maxWidth)}px`;
-        box.style.minHeight = `${Math.min(110, maxHeight)}px`;
+        const minimum = minimumWindowSize(root);
+        const maxWidth = Math.max(1, innerWidth - 20);
+        const maxHeight = Math.max(1, innerHeight - 20);
+        const width = Math.min(maxWidth, Math.max(Math.min(minimum.width, maxWidth), gesture.width + dx));
+        box.style.minWidth = `${Math.min(minimum.width, maxWidth)}px`;
+        box.style.setProperty("width", `${width}px`);
+        const heightMinimum = Math.min(minimumWindowSize(root).height, maxHeight);
+        const height = Math.min(maxHeight, Math.max(heightMinimum, gesture.height + dy));
+        box.style.minHeight = `${heightMinimum}px`;
+        box.style.setProperty("height", `${height}px`, "important");
+        overlayHost.style.left = `${Math.max(4, Math.min(gesture.left, innerWidth - width - 4))}px`;
+        overlayHost.style.top = `${Math.max(4, Math.min(gesture.top, innerHeight - height - 4))}px`;
         box.style.overflow = "auto";
       }
     };
