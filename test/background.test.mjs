@@ -4,6 +4,10 @@ import assert from "node:assert/strict";
 test("background restores state and routes test actions", async () => {
   const saved = { "ya-test-run-7": { tabId: 7, network: { requests: 3 }, tests: { save: { phase: "waiting-save", method: "setData" } } } };
   let listener;
+  let failVisibleCapture = false;
+  let failDebuggerCapture = false;
+  let detachCount = 0;
+  const scriptCalls = [];
   const broadcasts = [];
   globalThis.chrome = {
     storage: { local: {
@@ -13,15 +17,41 @@ test("background restores state and routes test actions", async () => {
     } },
     runtime: { getManifest: () => ({ version: "0.18.0" }), onMessage: { addListener(fn) { listener = fn; } }, sendMessage: async (message) => { broadcasts.push(message); } },
     action: { onClicked: { addListener() {} } },
+    scripting: { executeScript: async (args) => { scriptCalls.push(args); return []; } },
+    debugger: {
+      attach: async () => {},
+      detach: async () => { detachCount++; },
+      sendCommand: async () => {
+        if (failDebuggerCapture) throw Error("DevTools blocks capture");
+        return { data: "FALLBACK" };
+      }
+    },
     tabs: {
       onRemoved: { addListener() {} },
       get: async () => ({ windowId: 1 }),
-      captureVisibleTab: async () => "data:image/png;base64,AAAA",
+      captureVisibleTab: async () => {
+        if (failVisibleCapture) throw Error("activeTab permission missing");
+        return "data:image/png;base64,AAAA";
+      },
       reload: async () => {}
     }
   };
   await import(`../background.js?test=${Date.now()}`);
   const send = (message) => new Promise((resolve) => listener({ ...message, tabId: 7 }, {}, resolve));
+  failVisibleCapture = true;
+  const fallback = await send({ type: "CAPTURE" });
+  assert.equal(fallback.shot.dataUrl, "data:image/png;base64,FALLBACK");
+  assert.equal(detachCount, 1);
+  assert.equal(scriptCalls.length, 2);
+  failDebuggerCapture = true;
+  const rejected = await send({ type: "CAPTURE" });
+  assert.equal(rejected.ok, false);
+  assert.match(rejected.error, /DevTools blocks capture/);
+  assert.equal(scriptCalls.length, 4);
+  failVisibleCapture = false;
+  failDebuggerCapture = false;
+  await send({ type: "RESET" });
+  await send({ type: "TEST_ACTION", testId: "save", action: "start" });
   let response = await send({ type: "GET_STATE" });
   assert.equal(response.state.tests.save.phase, "waiting-save");
   assert.equal(response.state.tests.rewarded.phase, "idle");

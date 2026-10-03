@@ -183,12 +183,7 @@
 
   const sendOverlayAction = (testId, action, payload) => {
     if (!alive()) return;
-    overlayHost.style.visibility = "hidden";
     safeSend({ type: "TEST_ACTION", testId, action, payload });
-    setTimeout(() => {
-      if (overlayHost?.isConnected) overlayHost.style.visibility = "visible";
-      try { window.focus(); } catch (_) {}
-    }, action === "answer" || action === "reload" ? 900 : 120);
   };
 
   const guideMarkup = (visual) => {
@@ -269,9 +264,7 @@
           button.addEventListener("mousedown", (event) => event.preventDefault());
           button.addEventListener("click", () => {
             if (type === "CAPTURE") {
-              overlayHost.style.visibility = "hidden";
               safeSend({ type, ...extra });
-              setTimeout(() => { if (overlayHost?.isConnected) overlayHost.style.visibility = "visible"; }, 900);
               return;
             }
             safeSend({ type, ...extra });
@@ -454,10 +447,26 @@
       if (selected.qrUrl) body.append(mobileCard);
       body.append(actions);
     }
+    if (selected.error) {
+      const error = document.createElement("p");
+      error.className = "bad";
+      error.textContent = selected.error;
+      body.append(error);
+    }
     keepOverlayVisible();
   };
 
   port?.onMessage.addListener((message) => {
+    if (message?.type === "ACTION_RESULT") {
+      renderOverlay(latestOverlayViews, latestDashboard);
+      if (message.ok === false && overlayHost?.isConnected) {
+        const error = document.createElement("p");
+        error.className = "bad";
+        error.textContent = message.error || "Не удалось выполнить действие";
+        overlayHost.shadowRoot.querySelector(".body").append(error);
+      }
+      return;
+    }
     if (message?.type !== "OVERLAY_STATE") return;
     if (!message.enabled) {
       overlayHost?.remove();

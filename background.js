@@ -144,7 +144,7 @@ async function commit(tabId, persist = true) {
       const testState = state.tests?.[test.id] || test.initial();
       const view = test.view(testState);
       const complete = testState.phase === "complete";
-      return { id: test.id, title: test.title, status: view.status, tone: view.tone, instruction: view.instruction, visual: visualFor(test.id, testState.phase), mobileUrl: view.mobileUrl || null, qrUrl: view.qrUrl || null, complete, actions: complete ? [{ label: "Готово", action: "__done" }] : view.actions };
+      return { id: test.id, title: test.title, status: view.status, tone: view.tone, instruction: view.instruction, error: testState.error || null, visual: visualFor(test.id, testState.phase), mobileUrl: view.mobileUrl || null, qrUrl: view.qrUrl || null, complete, actions: complete ? [{ label: "Готово", action: "__done" }] : view.actions };
     });
     const completed = tests.map((test) => {
       const testState = state.tests?.[test.id] || test.initial();
@@ -181,7 +181,46 @@ async function commit(tabId, persist = true) {
 
 async function capture(tabId, label) {
   const tab = await chrome.tabs.get(tabId);
-  const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
+  let dataUrl;
+  let attachedForCapture = false;
+  const target = { tabId };
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId, frameIds: [0] },
+      func: async () => {
+        const overlay = document.getElementById("ya-games-qa-overlay");
+        if (!overlay) return;
+        overlay.dataset.captureOpacity = overlay.style.opacity;
+        overlay.style.opacity = "0";
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      }
+    });
+    try {
+      if (tab.active === false) throw new Error("Вкладка игры не активна");
+      dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
+    } catch (_) {
+      try {
+        await chrome.debugger.attach(target, "1.3");
+        attachedForCapture = true;
+      } catch (error) {
+        if (!String(error).includes("already attached")) throw error;
+      }
+      const screenshot = await chrome.debugger.sendCommand(target, "Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
+      if (!screenshot?.data) throw new Error("Браузер не вернул изображение");
+      dataUrl = `data:image/png;base64,${screenshot.data}`;
+    }
+  } finally {
+    if (attachedForCapture) await detachDebugger(tabId);
+    await chrome.scripting.executeScript({
+      target: { tabId, frameIds: [0] },
+      func: () => {
+        const overlay = document.getElementById("ya-games-qa-overlay");
+        if (!overlay || overlay.dataset.captureOpacity === undefined) return;
+        overlay.style.opacity = overlay.dataset.captureOpacity;
+        delete overlay.dataset.captureOpacity;
+      }
+    }).catch(() => {});
+  }
   const shot = { dataUrl, at: Date.now(), label };
   getRun(tabId).screenshots.push(shot);
   return shot;
@@ -554,7 +593,15 @@ chrome.runtime.onConnect?.addListener((port) => {
   framePorts.get(frameId).add(port);
   port.onMessage.addListener((message) => {
     if (!message?.type) return;
-    enqueue(tabId, () => handle(tabId, { ...message, frameId })).catch(() => {});
+    enqueue(tabId, () => handle(tabId, { ...message, frameId }))
+      .then((result) => {
+        if (message.type === "TEST_ACTION" || message.type === "CAPTURE") port.postMessage({ type: "ACTION_RESULT", ...result });
+      })
+      .catch((error) => {
+        if (message.type === "TEST_ACTION" || message.type === "CAPTURE") {
+          try { port.postMessage({ type: "ACTION_RESULT", ok: false, error: String(error) }); } catch (_) {}
+        }
+      });
   });
   port.onDisconnect.addListener(() => {
     framePorts.get(frameId)?.delete(port);
