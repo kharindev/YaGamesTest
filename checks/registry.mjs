@@ -9,6 +9,7 @@ import { moderationTest } from "./moderation.mjs";
 import { resolutionTest } from "./resolution.mjs";
 import { mobileTest } from "./mobile.mjs";
 import { purchasesTest } from "./purchases.mjs";
+import { crossDeviceTest } from "./cross-device.mjs";
 
-export const tests = [saveTest, purchasesTest, rewardedTest, interstitialTest, audioTest, languageTest, leaderboardTest, textAuditTest, resolutionTest, mobileTest, moderationTest];
+export const tests = [saveTest, crossDeviceTest, purchasesTest, rewardedTest, interstitialTest, audioTest, languageTest, leaderboardTest, textAuditTest, resolutionTest, mobileTest, moderationTest];
 export const testById = new Map(tests.map((test) => [test.id, test]));

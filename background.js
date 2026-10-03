@@ -43,6 +43,7 @@ const visualFor = (id, phase) => ({
   "interstitial:ask-resumed": "game-resumed",
   "interstitial:ask-sound-returned": "sound-resumed",
   "save:waiting-answer": "save-persisted",
+  "crossDevice:question": "save-persisted",
   "purchases:cancel-ask-game": "game-resumed",
   "purchases:cancel-ask-no-reward": "reward-result",
   "purchases:normal-ask-reward": "reward-result",

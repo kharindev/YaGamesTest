@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { tests, testById } from "../checks/registry.mjs";
 
 test("registry contains independent test definitions", () => {
-  assert.deepEqual(tests.map((entry) => entry.id), ["save", "purchases", "rewarded", "interstitial", "audio", "language", "leaderboard", "textAudit", "resolution", "mobileDevice", "moderation"]);
+  assert.deepEqual(tests.map((entry) => entry.id), ["save", "crossDevice", "purchases", "rewarded", "interstitial", "audio", "language", "leaderboard", "textAudit", "resolution", "mobileDevice", "moderation"]);
   for (const entry of tests) {
     assert.equal(testById.get(entry.id), entry);
     assert.equal(typeof entry.initial, "function");
@@ -11,6 +11,24 @@ test("registry contains independent test definitions", () => {
     assert.equal(typeof entry.event, "function");
     assert.equal(typeof entry.view, "function");
   }
+});
+
+test("cross-device flow fails on any inconsistent result", async () => {
+  const definition = testById.get("crossDevice");
+  const context = {
+    pageUrl: "https://yandex.ru/games/app/example-1",
+    makeQr: async () => "data:image/png;base64,QR",
+    capture: async (label) => ({ label })
+  };
+  let state = await definition.action(definition.initial(), "start", {}, context);
+  assert.equal(state.phase, "prepare-source");
+  state = await definition.action(state, "capture-source", {}, context);
+  assert.equal(state.phase, "open-target");
+  assert.equal(definition.view(state).qrUrl, "data:image/png;base64,QR");
+  state = await definition.action(state, "opened", {}, context);
+  for (const answer of [true, true, false, true]) state = await definition.action(state, "answer", { answer }, context);
+  assert.equal(state.phase, "complete");
+  assert.equal(state.result, "fail");
 });
 
 test("mobile device flow evaluates answers by question meaning", async () => {
