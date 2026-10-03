@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "ЯИ Тест — QA",
+  "version": "1.0.0",
+  "description": "Пошаговая QA-проверка игр на Яндекс Играх: SDK, покупки, реклама, сохранения, язык и отчёт.",
+  "permissions": ["activeTab", "tabs", "storage", "unlimitedStorage", "scripting", "debugger", "downloads", "webNavigation"],
+  "host_permissions": ["https://yandex.ru/games/*", "https://*.yandex.ru/games/*", "https://yandex.com/games/*", "https://*.yandex.com/games/*", "https://games.s3.yandex.net/*", "https://*.games.s3.yandex.net/*", "https://*.cdn.games.yandex.net/*", "https://api.qrserver.com/*"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://yandex.ru/games/*", "https://*.yandex.ru/games/*", "https://yandex.com/games/*", "https://*.yandex.com/games/*", "https://games.s3.yandex.net/*", "https://*.games.s3.yandex.net/*", "https://*.cdn.games.yandex.net/*"],
+      "js": ["content.js"],
+      "run_at": "document_start",
+      "all_frames": true
+    },
+    {
+      "matches": ["https://yandex.ru/games/*", "https://*.yandex.ru/games/*", "https://yandex.com/games/*", "https://*.yandex.com/games/*", "https://games.s3.yandex.net/*", "https://*.games.s3.yandex.net/*", "https://*.cdn.games.yandex.net/*"],
+      "js": ["page-monitor.js"],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "all_frames": true
+    }
+  ],
+  "action": {
+    "default_title": "Открыть ЯИ Тест — QA"
+  }
+}
