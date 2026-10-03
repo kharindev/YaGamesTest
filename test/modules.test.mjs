@@ -2,6 +2,31 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { tests, testById } from "../checks/registry.mjs";
 
+test("every test renders its initial and terminal states", () => {
+  for (const definition of tests) {
+    for (const result of ["good", "fail", "skip"]) {
+      const state = { ...definition.initial(), phase: "complete", result };
+      if (definition.id === "resolution") state.index = 4;
+      assert.doesNotThrow(() => definition.view(state), definition.id);
+    }
+    assert.doesNotThrow(() => definition.view(definition.initial()));
+  }
+});
+
+test("resolution finishes all four presets without breaking report rendering", async () => {
+  const definition = testById.get("resolution");
+  let resets = 0;
+  const context = { setViewport: async () => {}, resetViewport: async () => { resets++; } };
+  let state = await definition.action(definition.initial(), "start", {}, context);
+  for (const answer of [true, true, false, true]) {
+    state = await definition.action(state, "answer", { answer }, context);
+    assert.doesNotThrow(() => definition.view(state));
+  }
+  assert.equal(state.phase, "complete");
+  assert.equal(state.result, "fail");
+  assert.equal(resets, 1);
+});
+
 test("registry contains independent test definitions", () => {
   assert.deepEqual(tests.map((entry) => entry.id), ["save", "crossDevice", "purchases", "rewarded", "interstitial", "audio", "language", "leaderboard", "textAudit", "resolution", "mobileDevice", "moderation"]);
   for (const entry of tests) {

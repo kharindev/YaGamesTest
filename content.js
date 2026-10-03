@@ -18,11 +18,14 @@
   let latestOverlayViews = [];
   let latestDashboard = null;
   let windowGesture = null;
+  let actionSequence = 0;
+  let pendingAction = null;
   const listeners = new AbortController();
   const stop = () => {
     if (!contextValid) return;
     contextValid = false;
     if (metricsTimer !== null) clearInterval(metricsTimer);
+    if (pendingAction) clearTimeout(pendingAction.timer);
     try { observer?.disconnect(); } catch (_) {}
     try { listeners.abort(); } catch (_) {}
     try { port?.disconnect(); } catch (_) {}
@@ -183,7 +186,19 @@
 
   const sendOverlayAction = (testId, action, payload) => {
     if (!alive()) return;
-    safeSend({ type: "TEST_ACTION", testId, action, payload });
+    if (pendingAction) clearTimeout(pendingAction.timer);
+    const requestId = ++actionSequence;
+    const timer = setTimeout(() => {
+      if (pendingAction?.requestId !== requestId) return;
+      pendingAction = null;
+      renderOverlay(latestOverlayViews, latestDashboard);
+      const error = document.createElement("p");
+      error.className = "bad";
+      error.textContent = "Ответ расширения не получен. Проверьте подключение; можно выйти в меню проверок.";
+      overlayHost?.shadowRoot.querySelector(".body")?.append(error);
+    }, 45000);
+    pendingAction = { requestId, timer };
+    safeSend({ type: "TEST_ACTION", testId, action, payload, requestId });
   };
 
   const guideMarkup = (visual) => {
@@ -347,7 +362,7 @@
       body.append(list);
       return;
     }
-    const finished = selected.complete || ["GOOD", "FAIL", "SKIP"].includes(selected.status);
+    const finished = selected.complete;
     box.classList.toggle("finished", finished);
     const back = document.createElement("button");
     back.className = "back";
@@ -382,9 +397,7 @@
     const actions = document.createElement("div");
     actions.className = "actions";
     if (finished && selected.id !== "language") actions.classList.add("finished-actions");
-    const selectedActions = finished && selected.id === "language"
-      ? [{ label: "Проверить ещё язык", action: "another" }, { label: "Готово", action: "__done" }]
-      : finished ? [{ label: "Готово", action: "__done" }] : (selected.actions || []);
+    const selectedActions = finished ? [{ label: "Готово", action: "__done" }] : (selected.actions || []);
     if (!finished && selectedActions.length === 1 && !Array.isArray(selectedActions[0]?.options)) actions.classList.add("single-action");
     for (const action of selectedActions) {
       let selectedValue = null;
@@ -458,6 +471,11 @@
 
   port?.onMessage.addListener((message) => {
     if (message?.type === "ACTION_RESULT") {
+      if (message.requestId && pendingAction?.requestId !== message.requestId) return;
+      if (message.requestId && pendingAction) {
+        clearTimeout(pendingAction.timer);
+        pendingAction = null;
+      }
       renderOverlay(latestOverlayViews, latestDashboard);
       if (message.ok === false && overlayHost?.isConnected) {
         const error = document.createElement("p");

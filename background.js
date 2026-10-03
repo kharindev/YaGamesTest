@@ -1,9 +1,19 @@
 import { tests, testById } from "./checks/registry.mjs";
+import { boundedMethods } from "./checks/async.mjs";
+
+const api = {
+  storage: { local: boundedMethods(chrome.storage.local, ["get", "set", "remove"], "storage", 2000) },
+  tabs: boundedMethods(chrome.tabs, ["get", "update", "reload", "captureVisibleTab"], "tabs", 4000),
+  scripting: boundedMethods(chrome.scripting, ["executeScript"], "scripting", 4000),
+  debugger: boundedMethods(chrome.debugger, ["attach", "detach", "sendCommand"], "debugger", 4000),
+  downloads: boundedMethods(chrome.downloads, ["download"], "downloads", 4000)
+};
 
 const EXTENSION_VERSION = chrome.runtime.getManifest().version;
 
 const tabRuns = new Map();
 const queues = new Map();
+const pendingTelemetry = new Map();
 const contentPorts = new Map();
 const isYandexGamesUrl = (value = "") => {
   try {
@@ -52,13 +62,14 @@ const visualFor = (id, phase) => ({
   "leaderboard:ask-visible": "leaderboard-visible",
   "textAudit:review": "text-readable"
 })[`${id}:${phase}`] || null;
-const loaded = chrome.storage.local.get(null).then((saved) => {
+let storageLoadError = null;
+const loaded = api.storage.local.get(null).then((saved) => {
   for (const [key, value] of Object.entries(saved)) {
     if (key.startsWith("ya-test-run-") && value?.tabId && !tabRuns.has(value.tabId)) {
       tabRuns.set(value.tabId, normalizeRun(value, value.tabId));
     }
   }
-});
+}).catch((error) => { storageLoadError = String(error); });
 
 function emptyRun(tabId) {
   return {
@@ -112,7 +123,9 @@ function recordEvent(run, message) {
 
 function getRun(tabId) {
   if (!tabRuns.has(tabId)) tabRuns.set(tabId, emptyRun(tabId));
-  return tabRuns.get(tabId);
+  const run = tabRuns.get(tabId);
+  if (storageLoadError) addWarning(run, "storage-load", "error", storageLoadError);
+  return run;
 }
 
 function resetPageSession(run) {
@@ -131,12 +144,11 @@ function resetPageSession(run) {
 }
 
 async function detachDebugger(tabId) {
-  try { await chrome.debugger.detach({ tabId }); } catch (_) {}
+  try { await api.debugger.detach({ tabId }); } catch (_) {}
 }
 
 async function commit(tabId, persist = true) {
   const state = getRun(tabId);
-  if (persist) await chrome.storage.local.set({ [runKey(tabId)]: state });
   chrome.runtime.sendMessage({ type: "STATE", state }).catch(() => {});
   const framePorts = contentPorts.get(tabId);
   if (framePorts) {
@@ -144,7 +156,10 @@ async function commit(tabId, persist = true) {
       const testState = state.tests?.[test.id] || test.initial();
       const view = test.view(testState);
       const complete = testState.phase === "complete";
-      return { id: test.id, title: test.title, status: view.status, tone: view.tone, instruction: view.instruction, error: testState.error || null, visual: visualFor(test.id, testState.phase), mobileUrl: view.mobileUrl || null, qrUrl: view.qrUrl || null, complete, actions: complete ? [{ label: "Готово", action: "__done" }] : view.actions };
+      const actions = complete ? [{ label: "Готово", action: "__done" }] : view.actions;
+      const waitingActions = !complete && testState.phase !== "idle" && !actions.length
+        ? [{ label: "Событие не пришло — FAIL", action: "fail-wait", tone: "no" }] : actions;
+      return { id: test.id, title: test.title, status: view.status, tone: view.tone, instruction: view.instruction, error: testState.error || null, visual: visualFor(test.id, testState.phase), mobileUrl: view.mobileUrl || null, qrUrl: view.qrUrl || null, complete, actions: waitingActions };
     });
     const completed = tests.map((test) => {
       const testState = state.tests?.[test.id] || test.initial();
@@ -177,51 +192,73 @@ async function commit(tabId, persist = true) {
       }
     }
   }
+  if (persist) {
+    try { await api.storage.local.set({ [runKey(tabId)]: state }); }
+    catch (error) {
+      addWarning(state, "storage-write", "error", `Отчёт в памяти; запись на диск не выполнена: ${error}`);
+      await commit(tabId, false);
+    }
+  }
 }
 
 async function capture(tabId, label) {
-  const tab = await chrome.tabs.get(tabId);
+  const tab = await api.tabs.get(tabId);
   let dataUrl;
   let attachedForCapture = false;
   const target = { tabId };
   try {
-    await chrome.scripting.executeScript({
+    await api.scripting.executeScript({
       target: { tabId, frameIds: [0] },
       func: async () => {
         const overlay = document.getElementById("ya-games-qa-overlay");
         if (!overlay) return;
+        const token = `${Date.now()}-${Math.random()}`;
+        overlay.dataset.captureToken = token;
         overlay.dataset.captureOpacity = overlay.style.opacity;
         overlay.style.opacity = "0";
-        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        const restore = () => {
+          if (overlay.dataset.captureToken !== token || overlay.dataset.captureOpacity === undefined) return;
+          overlay.style.opacity = overlay.dataset.captureOpacity;
+          delete overlay.dataset.captureOpacity;
+          delete overlay.dataset.captureToken;
+        };
+        // Restore locally even if the worker or debugger disconnects.
+        setTimeout(restore, 12000);
+        await new Promise((resolve) => {
+          const timer = setTimeout(resolve, 120);
+          requestAnimationFrame(() => requestAnimationFrame(() => { clearTimeout(timer); resolve(); }));
+        });
       }
     });
     try {
       if (tab.active === false) throw new Error("Вкладка игры не активна");
-      dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
+      dataUrl = await api.tabs.captureVisibleTab(tab.windowId, { format: "png" });
     } catch (_) {
       try {
-        await chrome.debugger.attach(target, "1.3");
+        await api.debugger.attach(target, "1.3");
         attachedForCapture = true;
       } catch (error) {
         if (!String(error).includes("already attached")) throw error;
       }
-      const screenshot = await chrome.debugger.sendCommand(target, "Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
+      const screenshot = await api.debugger.sendCommand(target, "Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
       if (!screenshot?.data) throw new Error("Браузер не вернул изображение");
       dataUrl = `data:image/png;base64,${screenshot.data}`;
     }
   } finally {
     if (attachedForCapture) await detachDebugger(tabId);
-    await chrome.scripting.executeScript({
+    await api.scripting.executeScript({
       target: { tabId, frameIds: [0] },
       func: () => {
         const overlay = document.getElementById("ya-games-qa-overlay");
         if (!overlay || overlay.dataset.captureOpacity === undefined) return;
         overlay.style.opacity = overlay.dataset.captureOpacity;
         delete overlay.dataset.captureOpacity;
+        delete overlay.dataset.captureToken;
       }
     }).catch(() => {});
   }
   const shot = { dataUrl, at: Date.now(), label };
+  if (!dataUrl) throw new Error("Браузер не вернул снимок");
   getRun(tabId).screenshots.push(shot);
   return shot;
 }
@@ -233,15 +270,15 @@ function context(tabId) {
     reload: async () => {
       const run = getRun(tabId);
       resetPageSession(run);
-      await chrome.storage.local.set({ [runKey(tabId)]: run });
-      await chrome.tabs.reload(tabId, { bypassCache: true });
+      await api.storage.local.set({ [runKey(tabId)]: run });
+      await api.tabs.reload(tabId, { bypassCache: true });
     },
     gameFrameUrl: getRun(tabId).gameFrameUrl,
     pageUrl: getRun(tabId).url,
     makeQr: async (value) => {
       const remote = `https://api.qrserver.com/v1/create-qr-code/?size=220x220&margin=8&data=${encodeURIComponent(value)}`;
       try {
-        const response = await fetch(remote);
+        const response = await fetch(remote, { signal: AbortSignal.timeout(5000) });
         if (!response.ok) throw new Error(`QR HTTP ${response.status}`);
         const bytes = new Uint8Array(await response.arrayBuffer());
         let binary = "";
@@ -251,17 +288,17 @@ function context(tabId) {
     },
     setLanguage: async (lang, locale) => {
       const target = { tabId };
-      try { await chrome.debugger.attach(target, "1.3"); }
+      try { await api.debugger.attach(target, "1.3"); }
       catch (error) { if (!String(error).includes("already attached")) throw error; }
-      await chrome.debugger.sendCommand(target, "Emulation.setLocaleOverride", { locale });
-      await chrome.debugger.sendCommand(target, "Network.enable");
-      await chrome.debugger.sendCommand(target, "Network.setExtraHTTPHeaders", {
+      await api.debugger.sendCommand(target, "Emulation.setLocaleOverride", { locale });
+      await api.debugger.sendCommand(target, "Network.enable");
+      await api.debugger.sendCommand(target, "Network.setExtraHTTPHeaders", {
         headers: { "Accept-Language": `${locale},${lang};q=0.9` }
       });
-      const tab = await chrome.tabs.get(tabId);
+      const tab = await api.tabs.get(tabId);
       const url = new URL(tab.url);
       url.searchParams.set("lang", lang);
-      setTimeout(() => chrome.tabs.update(tabId, { url: url.toString() }), 150);
+      await api.tabs.update(tabId, { url: url.toString() });
       const requestedLang = lang;
       setTimeout(() => { enqueue(tabId, async () => {
         const state = getRun(tabId);
@@ -276,22 +313,22 @@ function context(tabId) {
     },
     setViewport: async ({ width, height, mobile }) => {
       const target = { tabId };
-      try { await chrome.debugger.attach(target, "1.3"); }
+      try { await api.debugger.attach(target, "1.3"); }
       catch (error) { if (!String(error).includes("already attached")) throw error; }
-      await chrome.debugger.sendCommand(target, "Emulation.setDeviceMetricsOverride", {
+      await api.debugger.sendCommand(target, "Emulation.setDeviceMetricsOverride", {
         width, height, deviceScaleFactor: 1, mobile: Boolean(mobile), screenWidth: width, screenHeight: height
       });
-      await chrome.debugger.sendCommand(target, "Emulation.setTouchEmulationEnabled", { enabled: Boolean(mobile), maxTouchPoints: mobile ? 5 : 1 });
+      await api.debugger.sendCommand(target, "Emulation.setTouchEmulationEnabled", { enabled: Boolean(mobile), maxTouchPoints: mobile ? 5 : 1 });
     },
     resetViewport: async () => {
       const target = { tabId };
-      try { await chrome.debugger.sendCommand(target, "Emulation.clearDeviceMetricsOverride"); } catch (_) {}
-      try { await chrome.debugger.sendCommand(target, "Emulation.setTouchEmulationEnabled", { enabled: false }); } catch (_) {}
+      try { await api.debugger.sendCommand(target, "Emulation.clearDeviceMetricsOverride"); } catch (_) {}
+      try { await api.debugger.sendCommand(target, "Emulation.setTouchEmulationEnabled", { enabled: false }); } catch (_) {}
     },
     scanText: async () => {
       const frameId = getRun(tabId).gameFrameId;
       if (!Number.isInteger(frameId)) throw new Error("Игровой iframe не найден");
-      const [execution] = await chrome.scripting.executeScript({
+      const [execution] = await api.scripting.executeScript({
         target: { tabId, frameIds: [frameId] },
         func: () => {
           const selectors = "h1,h2,h3,h4,h5,h6,p,span,label,button,a,li,input,textarea,[role=button],[aria-label]";
@@ -328,7 +365,7 @@ function context(tabId) {
         { id: "errors", label: "Нет JavaScript-ошибок", status: run.warnings.some((item) => String(item.code).startsWith("page-error:")) ? "fail" : "good", detail: run.warnings.filter((item) => String(item.code).startsWith("page-error:")).map((item) => item.text).join("; ") || "Ошибок не поймано" }
       ];
       if (Number.isInteger(run.gameFrameId)) {
-        const [execution] = await chrome.scripting.executeScript({
+        const [execution] = await api.scripting.executeScript({
           target: { tabId, frameIds: [run.gameFrameId] },
           func: () => {
             const origin = location.origin;
@@ -359,7 +396,7 @@ async function handle(tabId, message) {
   if (message.type === "RELOAD_GAME") {
     resetPageSession(run);
     await commit(tabId);
-    await chrome.tabs.reload(tabId, { bypassCache: true });
+    await api.tabs.reload(tabId, { bypassCache: true });
     return { ok: true };
   }
   if (message.type === "EXPORT_REPORT") {
@@ -381,12 +418,12 @@ async function handle(tabId, message) {
     ).join("") || "<p>Снимков нет</p>";
     const html = `<!doctype html><html lang="ru"><meta charset="utf-8"><title>ЯИ Тест — отчёт</title><style>body{font:14px system-ui;max-width:1100px;margin:30px auto;padding:0 20px;color:#171923}section{border:1px solid #ddd;border-radius:12px;padding:15px;margin:12px 0}.good{border-left:5px solid #25a964}.fail{border-left:5px solid #d64055}.skip{border-left:5px solid #d49b27}li{margin:12px 0}p{margin:5px 0;color:#4b5563}.summary{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}.summary b{display:block;font-size:18px}.shots{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px}.shots figure{margin:0;border:1px solid #ddd;border-radius:10px;overflow:hidden}.shots img{display:block;width:100%;height:auto}.shots figcaption{padding:8px;color:#4b5563}@media(max-width:650px){.summary{grid-template-columns:1fr 1fr}}</style><h1>ЯИ Тест — QA отчёт</h1><p>${escapeHtml(run.title || "Игра")} · ${escapeHtml(run.url || "")} · ${new Date().toLocaleString("ru-RU")}</p><section class="summary"><div>Game Ready<b>${run.ready ? `${(run.ready.elapsedMs / 1000).toFixed(2)} с` : "WAIT"}</b></div><div>SDK init<b>${run.sdkInitialized == null ? "—" : `${(run.sdkInitialized / 1000).toFixed(2)} с`}</b></div><div>Загрузка<b>${(Number(run.network?.transferBytes || 0) / 1024 / 1024).toFixed(2)} МБ</b></div><div>Запросы<b>${Number(run.network?.requests || 0)}</b></div></section><h2>Issues</h2><ul>${issues}</ul><h2>Предупреждения</h2><ul>${warnings}</ul>${rows}<h2>Снимки</h2><div class="shots">${screenshots}</div></html>`;
     const url = `data:text/html;charset=utf-8,${encodeURIComponent(html)}`;
-    await chrome.downloads.download({ url, filename: `ya-test-report-${new Date().toISOString().replace(/[:.]/g, "-")}.html`, saveAs: true });
+    await api.downloads.download({ url, filename: `ya-test-report-${new Date().toISOString().replace(/[:.]/g, "-")}.html`, saveAs: true });
     return { ok: true };
   }
   if (message.type === "FOCUS_GAME") {
-    await chrome.tabs.update(tabId, { active: true });
-    await chrome.scripting.executeScript({
+    await api.tabs.update(tabId, { active: true });
+    await api.scripting.executeScript({
       target: { tabId, allFrames: true },
       func: () => {
         try { window.focus(); } catch (_) {}
@@ -398,8 +435,8 @@ async function handle(tabId, message) {
   }
   if (message.type === "ATTACH") {
     const results = await Promise.allSettled([
-      chrome.scripting.executeScript({ target: { tabId, allFrames: true }, files: ["content.js"] }),
-      chrome.scripting.executeScript({ target: { tabId, allFrames: true }, files: ["page-monitor.js"], world: "MAIN" })
+      api.scripting.executeScript({ target: { tabId, allFrames: true }, files: ["content.js"] }),
+      api.scripting.executeScript({ target: { tabId, allFrames: true }, files: ["page-monitor.js"], world: "MAIN" })
     ]);
     return { ok: results.some((item) => item.status === "fulfilled") };
   }
@@ -417,7 +454,19 @@ async function handle(tabId, message) {
   if (message.type === "TEST_ACTION") {
     const test = testById.get(message.testId);
     if (!test) return { ok: false, error: "Unknown test" };
-    run.tests[test.id] = await test.action(run.tests[test.id], message.action, message.payload, context(tabId));
+    if (message.action === "fail-wait") {
+      const state = run.tests[test.id];
+      if (state.phase !== "idle" && state.phase !== "complete") {
+        state.error = `Ожидаемое событие не получено: ${state.phase}`;
+        state.result = "fail";
+        state.phase = "complete";
+      }
+    } else {
+      try { run.tests[test.id] = await test.action(run.tests[test.id], message.action, message.payload, context(tabId)); }
+      catch (error) {
+        Object.assign(run.tests[test.id], { phase: "complete", result: "fail", error: String(error) });
+      }
+    }
     await commit(tabId);
     return { ok: true };
   }
@@ -523,14 +572,17 @@ async function handle(tabId, message) {
       run.gameplayState = nextState;
     }
     for (const test of tests) {
-      run.tests[test.id] = await test.event(run.tests[test.id], message, context(tabId));
+      try { run.tests[test.id] = await test.event(run.tests[test.id], message, context(tabId)); }
+      catch (error) {
+        Object.assign(run.tests[test.id], { phase: "complete", result: "fail", error: String(error) });
+      }
     }
   } else if (message.type === "CAPTURE") {
     const shot = await capture(tabId, message.label || "Снимок");
     await commit(tabId);
     return { ok: true, shot };
   } else return { ok: false, error: "Unknown message" };
-  await commit(tabId, message.type !== "METRICS");
+  await commit(tabId, !["METRICS", "PLATFORM_STATE"].includes(message.type));
   return { ok: true };
 }
 
@@ -542,17 +594,33 @@ function enqueue(tabId, task) {
   return next;
 }
 
+function dispatch(tabId, message) {
+  // One pending metrics sample per frame. A busy renderer must not put
+  // thousands of obsolete telemetry writes ahead of a user's answer.
+  if (!["METRICS", "PLATFORM_STATE"].includes(message.type)) return enqueue(tabId, () => handle(tabId, message));
+  const key = `${tabId}:${message.type}:${message.frameId ?? message.frameUrl ?? 0}`;
+  const existing = pendingTelemetry.get(key);
+  if (existing) { existing.message = message; return existing.promise; }
+  const pending = { message, promise: null };
+  pending.promise = enqueue(tabId, () => {
+    pendingTelemetry.delete(key);
+    return handle(tabId, pending.message);
+  });
+  pendingTelemetry.set(key, pending);
+  return pending.promise;
+}
+
 chrome.action.onClicked.addListener(async (tab) => {
   if (!tab.id || !isYandexGamesUrl(tab.url)) return;
   try {
-    await chrome.scripting.executeScript({ target: { tabId: tab.id, allFrames: true }, files: ["content.js"] });
-    await chrome.scripting.executeScript({ target: { tabId: tab.id, allFrames: true }, files: ["page-monitor.js"], world: "MAIN" });
+    await api.scripting.executeScript({ target: { tabId: tab.id, allFrames: true }, files: ["content.js"] });
+    await api.scripting.executeScript({ target: { tabId: tab.id, allFrames: true }, files: ["page-monitor.js"], world: "MAIN" });
   } catch (_) {}
 });
 chrome.tabs.onUpdated?.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status !== "complete" || !isYandexGamesUrl(tab.url)) return;
-  chrome.scripting.executeScript({ target: { tabId, allFrames: true }, files: ["content.js"] }).catch(() => {});
-  chrome.scripting.executeScript({ target: { tabId, allFrames: true }, files: ["page-monitor.js"], world: "MAIN" }).catch(() => {});
+  api.scripting.executeScript({ target: { tabId, allFrames: true }, files: ["content.js"] }).catch(() => {});
+  api.scripting.executeScript({ target: { tabId, allFrames: true }, files: ["page-monitor.js"], world: "MAIN" }).catch(() => {});
 });
 chrome.webNavigation?.onCommitted?.addListener((details) => {
   if (!details.tabId || details.frameId === 0 || !isHostedGameFrame(details.url)) return;
@@ -564,21 +632,21 @@ chrome.webNavigation?.onCommitted?.addListener((details) => {
     await commit(details.tabId);
     const target = { tabId: details.tabId, frameIds: [details.frameId] };
     await Promise.allSettled([
-      chrome.scripting.executeScript({ target, files: ["content.js"] }),
-      chrome.scripting.executeScript({ target, files: ["page-monitor.js"], world: "MAIN" })
+      api.scripting.executeScript({ target, files: ["content.js"] }),
+      api.scripting.executeScript({ target, files: ["page-monitor.js"], world: "MAIN" })
     ]);
   }).catch(() => {});
 });
 chrome.tabs.onRemoved.addListener((tabId) => {
   enqueue(tabId, async () => {
     tabRuns.delete(tabId);
-    await chrome.storage.local.remove(runKey(tabId));
+    await api.storage.local.remove(runKey(tabId));
   }).catch(() => {});
 });
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const tabId = sender.tab?.id ?? message?.tabId;
   if (!tabId || !message?.type || message.type === "STATE") return;
-  enqueue(tabId, () => handle(tabId, message))
+  dispatch(tabId, message)
     .then(sendResponse)
     .catch((error) => sendResponse({ ok: false, error: String(error) }));
   return true;
@@ -593,13 +661,13 @@ chrome.runtime.onConnect?.addListener((port) => {
   framePorts.get(frameId).add(port);
   port.onMessage.addListener((message) => {
     if (!message?.type) return;
-    enqueue(tabId, () => handle(tabId, { ...message, frameId }))
+    dispatch(tabId, { ...message, frameId })
       .then((result) => {
-        if (message.type === "TEST_ACTION" || message.type === "CAPTURE") port.postMessage({ type: "ACTION_RESULT", ...result });
+        if (["TEST_ACTION", "CAPTURE", "RESET", "RELOAD_GAME", "EXPORT_REPORT"].includes(message.type)) port.postMessage({ type: "ACTION_RESULT", requestId: message.requestId, ...result });
       })
       .catch((error) => {
-        if (message.type === "TEST_ACTION" || message.type === "CAPTURE") {
-          try { port.postMessage({ type: "ACTION_RESULT", ok: false, error: String(error) }); } catch (_) {}
+        if (["TEST_ACTION", "CAPTURE", "RESET", "RELOAD_GAME", "EXPORT_REPORT"].includes(message.type)) {
+          try { port.postMessage({ type: "ACTION_RESULT", requestId: message.requestId, ok: false, error: String(error) }); } catch (_) {}
         }
       });
   });

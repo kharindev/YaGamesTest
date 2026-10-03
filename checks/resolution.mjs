@@ -39,7 +39,7 @@ export const resolutionTest = {
     const screens = {
       idle: ["НЕ ЗАПУЩЕНО", "Проверим desktop, laptop, tablet и mobile в реальных размерах viewport.", [{ label: "Запустить набор", action: "start" }]],
       applying: ["RESIZE", `Устанавливаем ${preset?.label || "размер"}…`, []],
-      "ask-visible": ["QUESTION", `${preset.label}: интерфейс помещается, текст читается, управление доступно?`, [{ label: "ДА", action: "answer", payload: { answer: true }, tone: "yes" }, { label: "НЕТ", action: "answer", payload: { answer: false }, tone: "no" }]],
+      "ask-visible": ["QUESTION", `${preset?.label || "Размер"}: интерфейс помещается, текст читается, управление доступно?`, [{ label: "ДА", action: "answer", payload: { answer: true }, tone: "yes" }, { label: "НЕТ", action: "answer", payload: { answer: false }, tone: "no" }]],
       complete: [test.result?.toUpperCase() || "FAIL", test.result === "good" ? "Все четыре разрешения пройдены." : "На одном или нескольких разрешениях есть проблема.", []]
     };
     const [status, instruction, actions] = screens[test.phase] || screens.idle;
