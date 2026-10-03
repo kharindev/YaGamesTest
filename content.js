@@ -17,6 +17,7 @@
   let activeViewSignature = "";
   let latestOverlayViews = [];
   let latestDashboard = null;
+  let windowGesture = null;
   const listeners = new AbortController();
   const stop = () => {
     if (!contextValid) return;
@@ -41,9 +42,9 @@
   };
 
   const keepOverlayVisible = () => {
-    if (!overlayHost?.isConnected) return;
+    if (!overlayHost?.isConnected || windowGesture) return;
     requestAnimationFrame(() => {
-      if (!overlayHost?.isConnected) return;
+      if (!overlayHost?.isConnected || windowGesture) return;
       const rect = overlayHost.getBoundingClientRect();
       const left = Math.max(4, Math.min(Math.max(4, innerWidth - Math.min(rect.width, innerWidth - 8) - 4), rect.left));
       const top = Math.max(4, Math.min(Math.max(4, innerHeight - Math.min(rect.height, innerHeight - 8) - 4), rect.top));
@@ -72,27 +73,61 @@
     const box = root.querySelector(".box");
     const head = root.querySelector(".head");
     const body = root.querySelector(".body");
+    box.style.resize = "none";
+    const grip = document.createElement("div");
+    grip.title = "Изменить размер окна";
+    grip.setAttribute("aria-label", "Изменить размер окна");
+    grip.style.cssText = "position:absolute;right:0;bottom:0;width:26px;height:26px;cursor:nwse-resize;touch-action:none;z-index:2;background:linear-gradient(135deg,transparent 55%,#778297 56%,#778297 61%,transparent 62%,transparent 70%,#778297 71%,#778297 76%,transparent 77%);border-radius:0 0 12px 0";
+    root.append(grip);
+    head.style.touchAction = "none";
+    const beginGesture = (event, mode, control) => {
+      if (event.button !== 0 || windowGesture) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const rect = box.getBoundingClientRect();
+      windowGesture = { pointerId: event.pointerId, mode, x: event.clientX, y: event.clientY, left: rect.left, top: rect.top, width: rect.width, height: rect.height };
+      overlayHost.style.right = "auto";
+      overlayHost.style.bottom = "auto";
+      overlayHost.style.left = `${rect.left}px`;
+      overlayHost.style.top = `${rect.top}px`;
+      control.setPointerCapture(event.pointerId);
+    };
+    const moveGesture = (event) => {
+      const gesture = windowGesture;
+      if (!gesture || gesture.pointerId !== event.pointerId) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const dx = event.clientX - gesture.x;
+      const dy = event.clientY - gesture.y;
+      if (gesture.mode === "move") {
+        overlayHost.style.left = `${Math.max(4, Math.min(Math.max(4, innerWidth - gesture.width - 4), gesture.left + dx))}px`;
+        overlayHost.style.top = `${Math.max(4, Math.min(Math.max(4, innerHeight - gesture.height - 4), gesture.top + dy))}px`;
+      } else {
+        const maxWidth = Math.max(1, innerWidth - gesture.left - 4);
+        const maxHeight = Math.max(1, innerHeight - gesture.top - 4);
+        box.style.setProperty("width", `${Math.min(maxWidth, Math.max(Math.min(300, maxWidth), gesture.width + dx))}px`);
+        box.style.setProperty("height", `${Math.min(maxHeight, Math.max(Math.min(110, maxHeight), gesture.height + dy))}px`, "important");
+        box.style.minWidth = `${Math.min(300, maxWidth)}px`;
+        box.style.minHeight = `${Math.min(110, maxHeight)}px`;
+        box.style.overflow = "auto";
+      }
+    };
+    const finishGesture = (event) => {
+      if (!windowGesture || windowGesture.pointerId !== event.pointerId) return;
+      windowGesture = null;
+      keepOverlayVisible();
+    };
+    for (const control of [head, grip]) {
+      control.addEventListener("pointermove", moveGesture, { signal: listeners.signal });
+      for (const type of ["pointerup", "pointercancel", "lostpointercapture"]) control.addEventListener(type, finishGesture, { signal: listeners.signal });
+    }
+    grip.addEventListener("pointerdown", (event) => beginGesture(event, "resize", grip), { signal: listeners.signal });
     for (const type of ["pointerdown", "mousedown", "mouseup", "click", "keydown", "keyup"]) {
       box.addEventListener(type, (event) => event.stopPropagation());
     }
     head.addEventListener("pointerdown", (event) => {
       if (event.target.closest("button")) return;
-      event.preventDefault();
-      const rect = overlayHost.getBoundingClientRect();
-      const offsetX = event.clientX - rect.left;
-      const offsetY = event.clientY - rect.top;
-      overlayHost.style.right = "auto";
-      overlayHost.style.bottom = "auto";
-      const move = (next) => {
-        overlayHost.style.left = `${Math.max(0, Math.min(innerWidth - rect.width, next.clientX - offsetX))}px`;
-        overlayHost.style.top = `${Math.max(0, Math.min(innerHeight - 45, next.clientY - offsetY))}px`;
-      };
-      const finish = () => {
-        window.removeEventListener("pointermove", move, true);
-        window.removeEventListener("pointerup", finish, true);
-      };
-      window.addEventListener("pointermove", move, true);
-      window.addEventListener("pointerup", finish, true);
+      beginGesture(event, "move", head);
     });
     (document.documentElement || document.body).append(overlayHost);
     keepOverlayVisible();
